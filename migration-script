@@ -203,7 +203,7 @@ create_dumps() {
     
     local pg_dump_cmd_base=""
     if [[ "$POSTGRES_TYPE" == "docker" ]]; then
-        pg_dump_cmd_base="pg_dump -h localhost -U $POSTGRES_USER -d $POSTGRES_DB"
+        pg_dump_cmd_base="pg_dump -h $POSTGRES_HOST -U $POSTGRES_USER -d $POSTGRES_DB"
     else
         pg_dump_cmd_base="PGPASSWORD='$POSTGRES_PASSWORD' pg_dump -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB"
     fi
@@ -334,7 +334,8 @@ run_migration() {
     if [[ -n "$MIGRATOR_DOCKER_IMAGE" ]]; then
         # Run migrator in Docker
         info "Running migrator in Docker container: $MIGRATOR_DOCKER_IMAGE"
-        docker run --rm \
+        docker run -d \
+            --name tb_migrator_$(date +%s) \
             -v "$DUMP_DIR:/data/dump" \
             -v "$MIGRATION_DIR:/data/migration" \
             "$MIGRATOR_DOCKER_IMAGE" \
@@ -383,11 +384,21 @@ upload_sstables() {
             sstableloader_cmd="$sstableloader_cmd $dir"
             
             if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
-                # Copy SSTables to container and run sstableloader
-                docker cp "$dir" "$CASSANDRA_CONTAINER_NAME:/tmp/"
-                local container_path="/tmp/$(basename "$dir")"
-                docker exec "$CASSANDRA_CONTAINER_NAME" sstableloader --verbose --nodes localhost "$container_path"
+            # Determine the correct Cassandra host based on configuration
+            if [[ "$CASSANDRA_HOST" == "localhost" || "$CASSANDRA_HOST" == "127.0.0.1" ]]; then
+                # Get container's actual IP
+                CASSANDRA_NODE_HOST=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CASSANDRA_CONTAINER_NAME")
+                echo "Using Cassandra container IP: $CASSANDRA_NODE_HOST"
             else
+                CASSANDRA_NODE_HOST="$CASSANDRA_HOST"
+            fi
+            
+            # Copy SSTables to container and run sstableloader
+            docker exec "$CASSANDRA_CONTAINER_NAME" bash -c "mkdir -p /thingsboard && echo 'Created /thingsboard directory'"
+            docker cp "$dir" "$CASSANDRA_CONTAINER_NAME:/thingsboard/"
+            local container_path="/thingsboard/$(basename "$dir")"
+            docker exec "$CASSANDRA_CONTAINER_NAME" sstableloader --verbose --nodes "$CASSANDRA_NODE_HOST" --username "$CASSANDRA_USERNAME" --password "$CASSANDRA_PASSWORD" "$container_path"
+        else
                 eval "$sstableloader_cmd"
             fi
         else
@@ -461,7 +472,7 @@ main() {
     # Verify migration
     verify_migration
     
-    log "Migration automation completed successfully!"
+    log "Migration completed successfully!"
     log "You can now configure ThingsBoard to use Cassandra for timeseries data"
     
     # Optional cleanup
