@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# ThingsBoard Database Migration Automation Script
-# Supports both standalone and Docker deployments for PostgreSQL and Cassandra
-# Usage: ./migrate.sh [config_file]
-
 set -e  # Exit on any error
 
 # Default configuration
@@ -483,7 +479,6 @@ main() {
     fi
 }
 
-# Script entry point
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Show usage if help requested
     if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
