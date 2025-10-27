@@ -1,0 +1,494 @@
+#!/bin/bash
+
+set -e  # Exit on any error
+
+# Default configuration
+CONFIG_FILE="${1:-.env}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${SCRIPT_DIR}/migration.log"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log() {
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $1${NC}" | tee -a "$LOG_FILE"
+}
+
+warn() {
+    echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $1${NC}" | tee -a "$LOG_FILE"
+}
+
+error() {
+    echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}" | tee -a "$LOG_FILE"
+    exit 1
+}
+
+info() {
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $1${NC}" | tee -a "$LOG_FILE"
+}
+
+# Load configuration
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        warn "Configuration file $CONFIG_FILE not found! Creating template..."
+        create_config_template
+        info "Configuration template created at $CONFIG_FILE"
+        info "Please edit the configuration file with your database settings and run the script again."
+        info ""
+        info "Example: nano $CONFIG_FILE"
+        info "Then run: $0 $CONFIG_FILE"
+        exit 0
+    fi
+    
+    log "Loading configuration from $CONFIG_FILE"
+    source "$CONFIG_FILE"
+    
+    # Validate required variables
+    required_vars=(
+        "POSTGRES_TYPE" "POSTGRES_HOST" "POSTGRES_PORT" "POSTGRES_DB" 
+        "POSTGRES_USER" "POSTGRES_PASSWORD" "CASSANDRA_TYPE" 
+        "DUMP_DIR" "MIGRATION_DIR" "MIGRATOR_JAR"
+    )
+    
+    for var in "${required_vars[@]}"; do
+        if [[ -z "${!var}" ]]; then
+            error "Required variable $var is not set in $CONFIG_FILE"
+        fi
+    done
+}
+
+# Create configuration template
+create_config_template() {
+    cat > "$CONFIG_FILE" << 'EOF'
+# ThingsBoard Database Migration Configuration
+# Edit this file with your database settings
+
+# PostgreSQL Configuration
+POSTGRES_TYPE="standalone"  # "standalone" or "docker"
+POSTGRES_HOST="localhost"
+POSTGRES_PORT="5432"
+POSTGRES_DB="thingsboard"
+POSTGRES_USER="postgres"
+POSTGRES_PASSWORD="your_password_here"
+
+# For Docker PostgreSQL
+POSTGRES_CONTAINER_NAME="postgres_container"  # Only used if POSTGRES_TYPE=docker
+
+# Cassandra Configuration
+CASSANDRA_TYPE="standalone"  # "standalone" or "docker"
+CASSANDRA_HOST="localhost"
+CASSANDRA_PORT="9042"
+CASSANDRA_KEYSPACE="thingsboard"
+CASSANDRA_USERNAME="cassandra"
+CASSANDRA_PASSWORD="cassandra"
+
+# For Docker Cassandra
+CASSANDRA_CONTAINER_NAME="cassandra_container"  # Only used if CASSANDRA_TYPE=docker
+
+# Migration Settings
+DUMP_DIR="/tmp/migration_dumps"
+MIGRATION_DIR="/tmp/migration_output"
+MIGRATOR_JAR="./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar"
+
+# Optional: Docker image for migrator (if you want to run migrator in Docker)
+# Leave empty to run locally, or set to your Docker image
+MIGRATOR_DOCKER_IMAGE=""  # e.g., "yourusername/database-migrator:latest"
+
+# Migration Parameters
+CAST_ENABLE="false"
+PARTITIONING="MONTHS"
+LINES_TO_SKIP="0"
+
+# Custom table filtering (optional)
+# Set to true if you want to migrate only specific data
+USE_CUSTOM_TABLES="false"
+CUSTOM_TABLE_FILTER="ts_kv_dictionary.key in ('temperature', 'humidity') and device_profile.name in ('default')"
+
+# Example configurations:
+#
+# For Standalone PostgreSQL + Standalone Cassandra:
+#   POSTGRES_TYPE="standalone"
+#   CASSANDRA_TYPE="standalone" 
+#   (set appropriate hosts and credentials above)
+#
+# For Docker PostgreSQL + Docker Cassandra:
+#   POSTGRES_TYPE="docker"
+#   POSTGRES_CONTAINER_NAME="my_postgres"
+#   CASSANDRA_TYPE="docker"  
+#   CASSANDRA_CONTAINER_NAME="my_cassandra"
+#
+# To run migrator in Docker:
+#   MIGRATOR_DOCKER_IMAGE="yourusername/database-migrator:latest"
+#
+EOF
+}
+
+
+# Setup directories
+setup_directories() {
+    log "Setting up directories..."
+    
+    mkdir -p "$DUMP_DIR"
+    mkdir -p "$MIGRATION_DIR/thingsboard/ts_kv_cf"
+    mkdir -p "$MIGRATION_DIR/thingsboard/ts_kv_latest_cf" 
+    mkdir -p "$MIGRATION_DIR/thingsboard/ts_kv_partitions_cf"
+    
+    log "Directories created successfully"
+}
+
+# Execute command based on service type (standalone vs docker)
+execute_postgres_command() {
+    local cmd="$1"
+    
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        docker exec -i "$POSTGRES_CONTAINER_NAME" $cmd
+    else
+        eval $cmd
+    fi
+}
+
+execute_cassandra_command() {
+    local cmd="$1"
+    
+    if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+        docker exec -i "$CASSANDRA_CONTAINER_NAME" $cmd
+    else
+        eval $cmd
+    fi
+}
+
+# Test database connections
+test_connections() {
+    log "Testing database connections..."
+    
+    # Test PostgreSQL
+    info "Testing PostgreSQL connection..."
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        if ! docker exec "$POSTGRES_CONTAINER_NAME" pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
+            error "Cannot connect to PostgreSQL Docker container: $POSTGRES_CONTAINER_NAME"
+        fi
+    else
+        if ! PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '\q' > /dev/null 2>&1; then
+            error "Cannot connect to PostgreSQL at $POSTGRES_HOST:$POSTGRES_PORT"
+        fi
+    fi
+    log "PostgreSQL connection successful"
+    
+    # Test Cassandra
+    info "Testing Cassandra connection..."
+    if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+        if ! docker exec "$CASSANDRA_CONTAINER_NAME" cqlsh -e "describe keyspaces;" > /dev/null 2>&1; then
+            error "Cannot connect to Cassandra Docker container: $CASSANDRA_CONTAINER_NAME"
+        fi
+    else
+        if ! cqlsh "$CASSANDRA_HOST" "$CASSANDRA_PORT" -u "$CASSANDRA_USERNAME" -p "$CASSANDRA_PASSWORD" -e "describe keyspaces;" > /dev/null 2>&1; then
+            error "Cannot connect to Cassandra at $CASSANDRA_HOST:$CASSANDRA_PORT"
+        fi
+    fi
+    log "Cassandra connection successful"
+}
+
+# Create PostgreSQL dumps
+create_dumps() {
+    log "Creating PostgreSQL dumps..."
+    
+    local pg_dump_cmd_base=""
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        pg_dump_cmd_base="pg_dump -h $POSTGRES_HOST -U $POSTGRES_USER -d $POSTGRES_DB"
+    else
+        pg_dump_cmd_base="PGPASSWORD='$POSTGRES_PASSWORD' pg_dump -h $POSTGRES_HOST -p $POSTGRES_PORT -U $POSTGRES_USER -d $POSTGRES_DB"
+    fi
+    
+    # Dump related entities
+    info "Creating related entities dump..."
+    local related_cmd="$pg_dump_cmd_base --exclude-table=admin_settings \
+        --exclude-table=attribute_kv --exclude-table=audit_log --exclude-table=component_discriptor \
+        --exclude-table=device_credentials --exclude-table=event --exclude-table=oauth2_client_registration \
+        --exclude-table=oauth2_client_registration_info --exclude-table=oauth2_client_registration_template \
+        --exclude-table=relation --exclude-table=rule_node_state --exclude-table=tb_schema_settings \
+        --exclude-table=user_credentials --exclude-table='ts_kv*' --exclude-table='_timescaledb_internal.*'"
+    
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        echo "PGPASSWORD='$POSTGRES_PASSWORD'" | docker exec -i "$POSTGRES_CONTAINER_NAME" bash -c "$(cat) && $related_cmd" > "$DUMP_DIR/related_entities.dmp"
+    else
+        eval "$related_cmd" > "$DUMP_DIR/related_entities.dmp"
+    fi
+    
+    # Dump dictionary
+    info "Creating dictionary dump..."
+    local dict_cmd="$pg_dump_cmd_base --table=ts_kv_dictionary --table=key_dictionary"
+    
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        echo "PGPASSWORD='$POSTGRES_PASSWORD'" | docker exec -i "$POSTGRES_CONTAINER_NAME" bash -c "$(cat) && $dict_cmd" > "$DUMP_DIR/ts_kv_dictionary.dmp"
+    else
+        eval "$dict_cmd" > "$DUMP_DIR/ts_kv_dictionary.dmp"
+    fi
+    
+    # Dump timeseries data
+    info "Creating timeseries dump..."
+    
+    if [[ "$USE_CUSTOM_TABLES" == "true" ]]; then
+        # Create custom table first
+        local create_custom_cmd="$pg_dump_cmd_base -c \"
+        CREATE TABLE ts_kv_custom AS (
+            SELECT ts_kv.* FROM ts_kv 
+            JOIN ts_kv_dictionary ON ts_kv.key=ts_kv_dictionary.key_id 
+            JOIN device ON device.id=ts_kv.entity_id 
+            JOIN device_profile ON device_profile.id=device.device_profile_id 
+            WHERE $CUSTOM_TABLE_FILTER
+        );\""
+        
+        if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+            echo "PGPASSWORD='$POSTGRES_PASSWORD'" | docker exec -i "$POSTGRES_CONTAINER_NAME" bash -c "$(cat) && $create_custom_cmd"
+        else
+            eval "$create_custom_cmd"
+        fi
+        
+        local ts_cmd="$pg_dump_cmd_base --load-via-partition-root --data-only --table='ts_kv_custom*'"
+    else
+        local ts_cmd="$pg_dump_cmd_base --load-via-partition-root --data-only --table='ts_kv*' --table='_timescaledb_internal.*'"
+    fi
+    
+    if [[ "$POSTGRES_TYPE" == "docker" ]]; then
+        echo "PGPASSWORD='$POSTGRES_PASSWORD'" | docker exec -i "$POSTGRES_CONTAINER_NAME" bash -c "$(cat) && $ts_cmd" > "$DUMP_DIR/ts_kv_all.dmp"
+    else
+        eval "$ts_cmd" > "$DUMP_DIR/ts_kv_all.dmp"
+    fi
+    
+    log "PostgreSQL dumps created successfully"
+    
+    # Show dump sizes
+    info "Dump file sizes:"
+    ls -lh "$DUMP_DIR"/*.dmp | while read line; do
+        info "$line"
+    done
+}
+
+# Setup Cassandra keyspace and tables
+setup_cassandra() {
+    log "Setting up Cassandra keyspace and tables..."
+    
+    # Check if schema files exist
+    local schema_files=("src/main/resources/schema-ts.cql" "src/main/resources/schema-ts-latest.cql")
+    for schema_file in "${schema_files[@]}"; do
+        if [[ ! -f "$schema_file" ]]; then
+            warn "Schema file $schema_file not found, you may need to create keyspace manually"
+        fi
+    done
+    
+    # Create keyspace
+    local cql_cmd=""
+    if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+        cql_cmd="cqlsh -e"
+    else
+        cql_cmd="cqlsh $CASSANDRA_HOST $CASSANDRA_PORT -u $CASSANDRA_USERNAME -p $CASSANDRA_PASSWORD -e"
+    fi
+    
+    local keyspace_cql="CREATE KEYSPACE IF NOT EXISTS $CASSANDRA_KEYSPACE WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"
+    
+    if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+        docker exec "$CASSANDRA_CONTAINER_NAME" $cql_cmd "$keyspace_cql"
+    else
+        eval "$cql_cmd \"$keyspace_cql\""
+    fi
+    
+    # Execute schema files if they exist
+    for schema_file in "${schema_files[@]}"; do
+        if [[ -f "$schema_file" ]]; then
+            info "Executing schema file: $schema_file"
+            if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+                docker exec -i "$CASSANDRA_CONTAINER_NAME" cqlsh < "$schema_file"
+            else
+                cqlsh "$CASSANDRA_HOST" "$CASSANDRA_PORT" -u "$CASSANDRA_USERNAME" -p "$CASSANDRA_PASSWORD" -f "$schema_file"
+            fi
+        fi
+    done
+    
+    log "Cassandra setup completed"
+}
+
+# Run migration
+run_migration() {
+    log "Starting database migration..."
+    
+    local migrator_cmd="java -jar $MIGRATOR_JAR \
+        -telemetryFrom $DUMP_DIR/ts_kv_all.dmp \
+        -relatedEntities $DUMP_DIR/related_entities.dmp \
+        -dictionary $DUMP_DIR/ts_kv_dictionary.dmp \
+        -latestOut $MIGRATION_DIR/thingsboard/ts_kv_latest_cf \
+        -tsOut $MIGRATION_DIR/thingsboard/ts_kv_cf \
+        -partitionsOut $MIGRATION_DIR/thingsboard/ts_kv_partitions_cf \
+        -castEnable $CAST_ENABLE \
+        -partitioning $PARTITIONING \
+        -linesToSkip $LINES_TO_SKIP"
+    
+    if [[ -n "$MIGRATOR_DOCKER_IMAGE" ]]; then
+        # Run migrator in Docker
+        info "Running migrator in Docker container: $MIGRATOR_DOCKER_IMAGE"
+        docker run -d \
+            --name tb_migrator_$(date +%s) \
+            -v "$DUMP_DIR:/data/dump" \
+            -v "$MIGRATION_DIR:/data/migration" \
+            "$MIGRATOR_DOCKER_IMAGE" \
+            java -jar ./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar \
+            -telemetryFrom /data/dump/ts_kv_all.dmp \
+            -relatedEntities /data/dump/related_entities.dmp \
+            -dictionary /data/dump/ts_kv_dictionary.dmp \
+            -latestOut /data/migration/thingsboard/ts_kv_latest_cf \
+            -tsOut /data/migration/thingsboard/ts_kv_cf \
+            -partitionsOut /data/migration/thingsboard/ts_kv_partitions_cf \
+            -castEnable "$CAST_ENABLE" \
+            -partitioning "$PARTITIONING" \
+            -linesToSkip "$LINES_TO_SKIP" | tee -a "$LOG_FILE"
+    else
+        # Run migrator locally
+        info "Running migrator locally"
+        if [[ ! -f "$MIGRATOR_JAR" ]]; then
+            error "Migrator JAR not found at $MIGRATOR_JAR"
+        fi
+        eval "$migrator_cmd" | tee -a "$LOG_FILE"
+    fi
+    
+    log "Migration completed successfully"
+}
+
+# Upload SSTables to Cassandra
+upload_sstables() {
+    log "Uploading SSTables to Cassandra..."
+    
+    local sstable_dirs=(
+        "$MIGRATION_DIR/thingsboard/ts_kv_partitions_cf"
+        "$MIGRATION_DIR/thingsboard/ts_kv_cf" 
+        "$MIGRATION_DIR/thingsboard/ts_kv_latest_cf"
+    )
+    
+    for dir in "${sstable_dirs[@]}"; do
+        if [[ -d "$dir" ]] && [[ "$(ls -A "$dir")" ]]; then
+            info "Uploading SSTables from $dir"
+            
+            local sstableloader_cmd="sstableloader --verbose --nodes $CASSANDRA_HOST"
+            
+            if [[ "$CASSANDRA_USERNAME" != "" ]]; then
+                sstableloader_cmd="$sstableloader_cmd --username $CASSANDRA_USERNAME --password $CASSANDRA_PASSWORD"
+            fi
+            
+            sstableloader_cmd="$sstableloader_cmd $dir"
+            
+            if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+            # Determine the correct Cassandra host based on configuration
+            if [[ "$CASSANDRA_HOST" == "localhost" || "$CASSANDRA_HOST" == "127.0.0.1" ]]; then
+                # Get container's actual IP
+                CASSANDRA_NODE_HOST=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CASSANDRA_CONTAINER_NAME")
+                echo "Using Cassandra container IP: $CASSANDRA_NODE_HOST"
+            else
+                CASSANDRA_NODE_HOST="$CASSANDRA_HOST"
+            fi
+            
+            # Copy SSTables to container and run sstableloader
+            docker exec "$CASSANDRA_CONTAINER_NAME" bash -c "mkdir -p /thingsboard && echo 'Created /thingsboard directory'"
+            docker cp "$dir" "$CASSANDRA_CONTAINER_NAME:/thingsboard/"
+            local container_path="/thingsboard/$(basename "$dir")"
+            docker exec "$CASSANDRA_CONTAINER_NAME" sstableloader --verbose --nodes "$CASSANDRA_NODE_HOST" --username "$CASSANDRA_USERNAME" --password "$CASSANDRA_PASSWORD" "$container_path"
+        else
+                eval "$sstableloader_cmd"
+            fi
+        else
+            warn "No SSTables found in $dir, skipping..."
+        fi
+    done
+    
+    log "SSTables upload completed"
+}
+
+# Verify migration
+verify_migration() {
+    log "Verifying migration..."
+    
+    # Count records in Cassandra
+    local cql_count="SELECT COUNT(*) FROM $CASSANDRA_KEYSPACE.ts_kv_cf;"
+    
+    if [[ "$CASSANDRA_TYPE" == "docker" ]]; then
+        local count_result=$(docker exec "$CASSANDRA_CONTAINER_NAME" cqlsh -e "$cql_count" | grep -E '^[[:space:]]*[0-9]+[[:space:]]*$' | tr -d ' ')
+    else
+        local count_result=$(cqlsh "$CASSANDRA_HOST" "$CASSANDRA_PORT" -u "$CASSANDRA_USERNAME" -p "$CASSANDRA_PASSWORD" -e "$cql_count" | grep -E '^[[:space:]]*[0-9]+[[:space:]]*$' | tr -d ' ')
+    fi
+    
+    info "Records in Cassandra ts_kv_cf: $count_result"
+    
+    if [[ "$count_result" -gt 0 ]]; then
+        log "Migration verification successful - data found in Cassandra"
+    else
+        warn "No data found in Cassandra - please check migration logs"
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    if [[ "$1" == "all" ]]; then
+        log "Cleaning up dump and migration files..."
+        rm -rf "$DUMP_DIR"
+        rm -rf "$MIGRATION_DIR" 
+    elif [[ "$1" == "dumps" ]]; then
+        log "Cleaning up dump files only..."
+        rm -rf "$DUMP_DIR"
+    fi
+}
+
+# Main function
+main() {
+    log "Starting ThingsBoard database migration automation"
+    log "Log file: $LOG_FILE"
+    
+    # Load configuration
+    load_config
+    
+    # Setup directories
+    setup_directories
+    
+    # Test connections
+    test_connections
+    
+    # Create dumps
+    create_dumps
+    
+    # Setup Cassandra
+    setup_cassandra
+    
+    # Run migration
+    run_migration
+    
+    # Upload SSTables
+    upload_sstables
+    
+    # Verify migration
+    verify_migration
+    
+    log "Migration completed successfully!"
+    log "You can now configure ThingsBoard to use Cassandra for timeseries data"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Show usage if help requested
+    if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+        echo "Usage: $0 [config_file]"
+        echo ""
+        echo "ThingsBoard Database Migration Automation Script"
+        echo "Migrates data from PostgreSQL to Cassandra with full automation"
+        echo ""
+        echo "Arguments:"
+        echo "  config_file    Configuration file path (default: .env)"
+        echo ""
+        echo "Commands:"
+        echo "  $0              - Run full migration with default config"
+        echo "  $0 my.env      - Run with custom config file"
+        echo "  $0 --help       - Show this help"
+        exit 0
+    fi
+    
+    main "$@"
+fi
