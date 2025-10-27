@@ -394,15 +394,30 @@ docker --version
 Docker version 28.5.1, build xxxxxxx
 ```
 
-Cloned repository on your local machine and updated the .env file according to your setup and the migration scenario you want to run.
+#### Build the Docker image with the migrator
+
+Navigate to the directory where you cloned the repository.
+
+Build the Docker image using the following command:
+
+```
+docker build -t <imageName> .
+```
+
+#### Modify .env file to your speicific setup and needs
+
+Update the .env parameters based on your environment configuration — for example, where PostgreSQL and Cassandra are running, and whether you plan to use Scenario 1 or Scenario 2.
+
+Be sure to update the MIGRATOR_DOCKER_IMAGE variable with the <imageName> of the image you built in the previous step.
 
 #### Run script
 
-After modifying .env file, run migration-script.sh with the following command:
+After updating the .env file, start the migration by running:
 
 ```
 ./migration-script.sh
 ```
+The script will automatically execute the migration process according to your configuration.
 
 ## Troubleshooting
 
