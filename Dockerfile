@@ -18,9 +18,6 @@ RUN wget https://archive.apache.org/dist/maven/maven-3/3.8.8/binaries/apache-mav
     && mv /opt/apache-maven-3.8.8 /opt/maven \
     && rm apache-maven-3.8.8-bin.tar.gz
 
-# Verify Java installation
-RUN java -version && javac -version
-
 # Create working directory
 WORKDIR /app
 

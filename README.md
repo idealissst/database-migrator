@@ -1,4 +1,39 @@
-# Prerequisites
+# Description
+
+This tool is used to migrate a ThingsBoard setup from **PostgreSQL-only** mode to **Hybrid mode** (PostgreSQL + Cassandra).
+
+The migration can be executed in two ways:
+
+1. [By running migration manually](#1-manual-usage)
+2. [Using migrator in Docker with `migration-script.sh` script](#2-migrator-in-docker), which runs the migration automatically
+
+Additionally, migration can be performed under different scenarios depending on your tolerance for downtime.
+
+### Scenario #1
+This is a scenario when rule engine requires historical data to work properly (e.g. you have rule nodes that are fetching historical data during processing new messages from devices). 
+In this case system downtime requires for the migration.
+ 
+### Scenario #2 
+This is a scenario when rule engine DOES NOT require historical data to work properly. 
+In this case system downtime not required (in case you are running cluster you can do this migration with zero downtime), or you'll need to restart ThingsBoard service in case of monolith setup.
+You'll need to upgrade configuration of ThingsBoard to use Cassandra for timeseries instead PostgreSQL - old historical data will be added to Cassandra from PostgreSQL later. 
+In this scenario historical data will not be available after the reconfiguration of ThingsBoard (for instance on dashboards), but you'll see after migration.  
+
+## Performance
+
+Performance of this tool depends on disk type and instance type (mostly on CPU resources).
+Here are few benchmarks in general:
+1. Creating Dump of the postgres ts_kv table (if it's size is 100 GB) ~ 1-2 hours
+2. Generation SSTables from dump 100 GB ~ 3-4 hours
+3. 100 GB dump file will be converted into SSTable with size about ~ 20-30 GB
+
+**NOTE** Recommended instance type in AWS is m5.xlarge or larger. Avoid using instance with burst CPUs.
+
+## 1. Manual usage
+
+You can run the migration manually if you want full control over each step.
+
+### Prerequisites
 
 **IMPORTANT! Requires Java 8 SDK**
 
@@ -11,32 +46,8 @@ OpenJDK Runtime Environment (build 1.8.0_292-8u292-b10-0ubuntu1~20.04-b10)
 OpenJDK 64-Bit Server VM (build 25.292-b10, mixed mode)
 ```
 
-# Description
-This tool used for migrating ThingsBoard setup from PostgreSQL only into Hybrid mode.
 
-You can use this tool in two scenarios.
-
-## Scenario #1
-This is a scenario when rule engine requires historical data to work properly (e.g. you have rule nodes that are fetching historical data during processing new messages from devices). 
-In this case system downtime requires for the migration.
- 
-## Scenario #2 
-This is a scenario when rule engine DOES NOT require historical data to work properly. 
-In this case system downtime not required (in case you are running cluster you can do this migration with zero downtime), or you'll need to restart ThingsBoard service in case of monolith setup.
-You'll need to upgrade configuration of ThingsBoard to use Cassandra for timeseries instead PostgreSQL - old historical data will be added to Cassandra from PostgreSQL later. 
-In this scenario historical data will not be available after the reconfiguration of ThingsBoard (for instance on dashboards), but you'll see after migration.  
-
-# Performance
-
-Performance of this tool depends on disk type and instance type (mostly on CPU resources).
-Here are few benchmarks in general:
-1. Creating Dump of the postgres ts_kv table (if it's size is 100 GB) ~ 1-2 hours
-2. Generation SSTables from dump 100 GB ~ 3-4 hours
-3. 100 GB dump file will be converted into SSTable with size about ~ 20-30 GB
-
-**NOTE** Recommended instance type in AWS is m5.xlarge or larger. Avoid using instance with burst CPUs.
-
-# Tool build instructions:
+## Tool build instructions:
 To build the project execute: 
 
 ```
@@ -45,11 +56,11 @@ mvn clean compile assembly:single
     
 It will generate single jar file with all required dependencies inside `target` dir -> `database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar`.
 
-# Prepare required files and run tool
+## Prepare required files and run tool
 
-## Scenario #1
+### Scenario #1
 
-### Cassandra setup
+#### Cassandra setup
 
 Install Cassandra - in this scenario you can install only single instance.
  
@@ -57,7 +68,7 @@ Using `cqlsh` create `thingsboard` keyspace and required tables.
 
 **NOTE** You can use *schema-ts.cql* and *schema-ts-latest.cql* files, that are located in main/resources folder of this project.
 
-### Dump data from the Postgres DB to files
+#### Dump data from the Postgres DB to files
 
 **Do not use compression if possible because tool can only work with uncompressed files**
 
@@ -104,7 +115,7 @@ Using `cqlsh` create `thingsboard` keyspace and required tables.
 
 > [Optional] Move table dumps to the instance where cassandra will be hosted
 
-### Prepare directory structure for SSTables
+#### Prepare directory structure for SSTables
 Tool use 3 different directories for saving SSTables - `ts_kv_cf`, `ts_kv_latest_cf`, `ts_kv_partitions_cf`.
 
 Create 3 empty directories. For example:
@@ -115,7 +126,7 @@ Create 3 empty directories. For example:
 /home/user/migration/ts_partition
 ```
     
-### Run tool
+#### Run tool
 
 **IMPORTANT! If you run this tool on the remote instance - don't forget to execute this command in `screen` to avoid unexpected termination**
 
@@ -150,7 +161,7 @@ java -jar ./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar \
 
 Tool execution time depends on DB size, CPU resources and disk throughput.
 
-### Loading SSTables into Cassandra
+#### Loading SSTables into Cassandra
 
 **Note that this part works only for single node Cassandra cluster**
 
@@ -183,13 +194,13 @@ export CASSANDRA_USERNAME=YOUR_CASSANDRA_USERNAME
 export CASSANDRA_PASSWORD=YOUR_CASSANDRA_PASSWORD
 ```
 
-### Final steps
+#### Final steps
 
 Start ThingsBoard instance and verify migration.
 
-## Scenario #2
+### Scenario #2
 
-### Cassandra setup
+#### Cassandra setup
 
 Install Cassandra - you can install single cluster, cluster of N nodes. Cluster can be in docker or k8s or bare metal.
  
@@ -197,7 +208,7 @@ Using `cqlsh` create `thingsboard` keyspace and required tables.
 
 **NOTE** You can use *schema-ts.cql* and *schema-ts-latest.cql* files, that are located in main/resources folder of this project.
 
-### Switch ThingsBoard into Hybrid Mode
+#### Switch ThingsBoard into Hybrid Mode
 
 Modify ThingsBoard properties file `thingsboard.conf` and add next lines:
 ```
@@ -212,7 +223,7 @@ export CASSANDRA_PASSWORD=YOUR_CASSANDRA_PASSWORD
 
 Re-start ThingsBoard and verify that new timeseries data written into Cassandra.
 
-### Dump data from the Postgres DB to files
+#### Dump data from the Postgres DB to files
 
 **Do not use compression if possible because tool can only work with uncompressed files**
 
@@ -258,7 +269,7 @@ Re-start ThingsBoard and verify that new timeseries data written into Cassandra.
 
 > [Optional] Move table dumps to the instance where cassandra will be hosted
 
-### Prepare directory structure for SSTables
+#### Prepare directory structure for SSTables
 Tool use 3 different directories for saving SSTables - `ts_kv_cf`, `ts_kv_latest_cf`, `ts_kv_partitions_cf`
 
 Create 3 empty directories. 
@@ -273,7 +284,7 @@ For example:
 /home/user/migration/thingsboard/ts_kv_latest_cf/
 ```
 
-### Run tool
+#### Run tool
 
 **IMPORTANT! If you run this tool on the remote instance - don't forget to execute this command in `screen` to avoid unexpected termination**
 
@@ -308,7 +319,7 @@ java -jar ./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar \
 
 Tool execution time depends on DB size, CPU resources and disk throughput.
 
-### Loading SSTables into Cassandra
+#### Loading SSTables into Cassandra
 
 Using [sstableloader](https://docs.datastax.com/en/cassandra-oss/3.x/cassandra/tools/toolsBulkloader.html) start loading data into Cassandra:
 
@@ -318,13 +329,13 @@ sstableloader --verbose --nodes CASSANDRA_NODES --username cassandra --password 
 sstableloader --verbose --nodes CASSANDRA_NODES --username cassandra --password CASSANDRA_PASSWORD /home/user/migration/thingsboard/ts_kv_cf/
 ```
 
-### Final steps
+#### Final steps
 
 Verify that historical data available in ThingsBoard.
 
-# Troubleshooting
+## Troubleshooting
 
-## Continue migration in case of failure on particular migration line
+### Continue migration in case of failure on particular migration line
 
 **IMPORTANT: works only in case of Scenario #2**  
 
@@ -367,3 +378,34 @@ java -jar ./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar \
 where XXXXXXX is the number of the line, that script should continue.
 
 * Continue migration according to the steps above in Scenario #2
+
+
+## 2. Migrator in Docker
+
+This method uses the `migration-script.sh` script to migrate timeseries data automatically from PostgreSQL to Cassandra based on the configuration defined in your `.env` file.
+
+### Prerequisites
+
+**IMPORTANT:** Docker must be installed on the machine where you run the migrator tool.
+
+Check Docker installation with:
+```
+docker --version
+Docker version 28.5.1, build xxxxxxx
+```
+
+Cloned repository on your local machine and updated the .env file according to your setup and the migration scenario you want to run.
+
+#### Run script
+
+After modifying .env file, run migration-script.sh with the following command:
+
+```
+./migration-script.sh
+```
+
+## Troubleshooting
+
+Check migration.log for errors during the migration process.
+
+If issues occur while creating dumps or loading SSTables into Cassandra, it may be useful to review the PostgreSQL logs or Cassandra logs as appropriate.

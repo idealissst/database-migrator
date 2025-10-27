@@ -91,8 +91,8 @@ CASSANDRA_PASSWORD="cassandra"
 CASSANDRA_CONTAINER_NAME="cassandra_container"  # Only used if CASSANDRA_TYPE=docker
 
 # Migration Settings
-DUMP_DIR="/tmp/migration_dumps"
-MIGRATION_DIR="/tmp/migration_output"
+DUMP_DIR="/tmp/migration_dumps" # Directory to store PostgreSQL dumps
+MIGRATION_DIR="/tmp/migration_output" # Directory to store generated SSTables
 MIGRATOR_JAR="./target/database-migrator-1.0-SNAPSHOT-jar-with-dependencies.jar"
 
 # Optional: Docker image for migrator (if you want to run migrator in Docker)
