@@ -391,8 +391,8 @@ This method uses the `migration-script.sh` script to migrate timeseries data aut
 Check Docker installation with:
 ```
 docker --version
-Docker version 28.5.1, build xxxxxxx
 ```
+Output should be similar to: 'Docker version 28.5.1, build xxxxxxx'
 
 #### Build the Docker image with the migrator
 
@@ -406,13 +406,13 @@ docker build -t <imageName> .
 
 #### Modify .env file to your speicific setup and needs
 
-Update the .env parameters based on your environment configuration — for example, where PostgreSQL and Cassandra are running, and whether you plan to use Scenario 1 or Scenario 2.
+Update the `.env` parameters based on your environment configuration, for example, where PostgreSQL and Cassandra are running, and whether you plan to use Scenario 1 or Scenario 2.
 
-Be sure to update the MIGRATOR_DOCKER_IMAGE variable with the <imageName> of the image you built in the previous step.
+Be sure to update the MIGRATOR_DOCKER_IMAGE variable with the `<imageName>` of the image you built in the previous step.
 
 #### Run script
 
-After updating the .env file, start the migration by running:
+After updating the `.env` file, start the migration by running:
 
 ```
 ./migration-script.sh
